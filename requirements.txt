@@ -1,0 +1,9 @@
+strands-agents
+strands-agents-tools
+boto3
+bedrock-agentcore
+bedrock-agentcore-starter-toolkit
+flask
+flask-limiter
+gunicorn
+requests

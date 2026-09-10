@@ -171,3 +171,77 @@ DOCUMENT_CHECKLISTS = {
     "japan": {"verified": False, "arrival": ["VERIFY — build out the confirmed arrival checklist for Japan (Residence Card, city hall registration, National Health Insurance enrollment, etc.)."], "renewal": ["VERIFY"]},
     "south korea": {"verified": False, "arrival": ["VERIFY — build out the confirmed arrival checklist for South Korea (Alien Registration Card / ARC within 90 days, NHIS enrollment, etc.)."], "renewal": ["VERIFY"]},
 }
+
+# ---------------------------------------------------------------------------
+# Miscellaneous country-specific admin requirements that don't fit the
+# categories above but commonly surprise new arrivals (e.g. bicycle
+# registration in Japan). Deliberately sparse — add entries only once
+# confirmed against an official source; the tool returns NOT_COVERED for
+# anything missing rather than letting the agent guess.
+# ---------------------------------------------------------------------------
+MISC_REQUIREMENTS = {
+    "japan": {
+        "bicycle_registration": {
+            "verified": False,
+            "note": (
+                "VERIFY — Japan requires bicycle owners to register a 'bousahan touroku' "
+                "(anti-theft/防犯登録) record, usually done at the bike shop at time of "
+                "purchase for a small fee, or otherwise at a local police box (koban) or "
+                "police station. Registration is tied to the owner and is checked if a "
+                "bike is stopped by police or found abandoned. Confirm the current process "
+                "and fee with your local koban or municipal office — it can vary slightly "
+                "by prefecture."
+            ),
+        },
+    },
+    "germany": {
+        "bicycle_registration": {
+            "verified": True,
+            "note": (
+                "No national registration requirement for owning/riding a bicycle. "
+                "Optional theft-deterrent registration (e.g. via police-affiliated "
+                "'Fahrradcodierung' coding events) exists in many cities but isn't mandatory."
+            ),
+        },
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Language-certification exam names and general job-search resources by
+# country. Exam names/institutions are stable, long-established facts (not
+# figures that change year to year), but application deadlines, fees, and
+# exact eligibility rules still move — the tool always tells the user to
+# confirm current fees/dates on the official site.
+# ---------------------------------------------------------------------------
+LANGUAGE_RESOURCES = {
+    "germany": {
+        "verified": True,
+        "exams": ["Goethe-Zertifikat (Goethe-Institut, A1-C2)", "TestDaF (academic, university admission)", "telc Deutsch", "DSH (university-administered)"],
+        "official_sites": ["https://www.goethe.de", "https://www.testdaf.de"],
+        "job_search": ["Bundesagentur für Arbeit / jobs board (arbeitsagentur.de)", "EURES (EU-wide, for EU/EEA-eligible roles)", "Make it in Germany (make-it-in-germany.com) — official skilled-worker portal"],
+    },
+    "italy": {
+        "verified": True,
+        "exams": ["CILS (Università per Stranieri di Siena)", "CELI (Università per Stranieri di Perugia)", "PLIDA (Società Dante Alighieri)"],
+        "official_sites": ["https://www.unistrasi.it", "https://www.unistrapg.it", "https://plida.it"],
+        "job_search": ["EURES (EU-wide)", "Centri per l'Impiego (local employment centers)"],
+    },
+    "france": {
+        "verified": True,
+        "exams": ["DELF/DALF (France Éducation international)", "TCF (Test de connaissance du français)", "TEF"],
+        "official_sites": ["https://www.france-education-international.fr"],
+        "job_search": ["EURES (EU-wide)", "France Travail (formerly Pôle emploi)", "Welcome to France job resources via Campus France"],
+    },
+    "japan": {
+        "verified": True,
+        "exams": ["JLPT — Japanese Language Proficiency Test (N5-N1)", "J.TEST", "NAT-TEST"],
+        "official_sites": ["https://www.jlpt.jp"],
+        "job_search": ["Hello Work (public employment service)", "University career centers commonly run new-graduate ('shinsotsu') recruiting support for international students"],
+    },
+    "south korea": {
+        "verified": True,
+        "exams": ["TOPIK — Test of Proficiency in Korean (levels 1-6)"],
+        "official_sites": ["https://www.topik.go.kr"],
+        "job_search": ["Work24 (work24.go.kr, public employment service)", "University international-student career offices"],
+    },
+}

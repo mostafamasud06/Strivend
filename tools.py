@@ -10,6 +10,7 @@ acting on it directly.
 """
 
 import json
+import os
 import re
 from datetime import datetime, date, timezone
 from pathlib import Path
@@ -25,7 +26,11 @@ from knowledge_base import (
     LOCAL_RULES,
     INSURANCE_REQUIREMENTS,
     DOCUMENT_CHECKLISTS,
+    MISC_REQUIREMENTS,
+    LANGUAGE_RESOURCES,
 )
+
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -454,6 +459,193 @@ def fetch_official_page_summary(url: str) -> str:
     truncated = text[:4000]
     suffix = "... [truncated]" if len(text) > 4000 else ""
     return f"Content fetched from {url}:\n\n{truncated}{suffix}"
+
+
+@tool
+def get_misc_local_requirement(country: str, topic: str) -> str:
+    """Get a one-off local administrative requirement that doesn't fall
+    under work hours, insurance, or documents — e.g. bicycle registration
+    in Japan, dog licensing, bank-account rules, SIM-card registration.
+
+    Args:
+        country: Destination country, e.g. "Japan".
+        topic: Short topic key, e.g. "bicycle_registration". If unsure of
+        the exact key, try a plain-language guess — the tool does a loose
+        match — and fall back to NOT_COVERED honestly if nothing matches
+        rather than guessing an answer yourself.
+
+    Returns:
+        The requirement note with a VERIFY warning if unconfirmed, or
+        NOT_COVERED if we have no entry — in which case suggest the user
+        check with the local municipal office, or use
+        fetch_official_page_summary on an official page if they have one.
+    """
+    country_entries = MISC_REQUIREMENTS.get(_normalize(country))
+    if not country_entries:
+        return f"NOT_COVERED — no misc. requirements recorded for '{country}' yet."
+
+    key = topic.strip().lower().replace(" ", "_")
+    entry = country_entries.get(key)
+    if not entry:
+        # loose match as a fallback
+        for k, v in country_entries.items():
+            if key in k or k in key:
+                entry = v
+                break
+    if not entry:
+        return f"NOT_COVERED — no entry for '{topic}' in {country.title()} yet. Suggest checking the local municipal/ward office directly."
+
+    return f"{entry['note']}{_verify_note(entry)}"
+
+
+@tool
+def get_language_certification_info(country: str) -> str:
+    """Get the recognized language-proficiency exams for a country, their
+    issuing institutions, official info sites, and general job-search
+    resources useful for international students/graduates.
+
+    Args:
+        country: Destination country, e.g. "France".
+
+    Returns:
+        Exam names, official sites, and job-search resource names. Exam
+        names/institutions are stable facts, but always tell the user to
+        confirm current test dates, fees, and registration windows on the
+        official site rather than stating them from memory.
+    """
+    entry = LANGUAGE_RESOURCES.get(_normalize(country))
+    if not entry:
+        return f"NOT_COVERED — no language/job-search resource list for '{country}' yet."
+
+    lines = [f"Recognized language exams for {country.title()}:"]
+    lines.extend(f"- {e}" for e in entry["exams"])
+    lines.append("\nOfficial sites (confirm current dates/fees here, don't state them from memory):")
+    lines.extend(f"- {s}" for s in entry["official_sites"])
+    lines.append("\nGeneral job-search resources:")
+    lines.extend(f"- {j}" for j in entry["job_search"])
+    return "\n".join(lines) + _verify_note(entry)
+
+
+@tool
+def find_nearby_office(office_type: str, city: str, country: str = "") -> str:
+    """Find real, nearby government/administrative offices (e.g. a
+    residence-permit office, a citizens' registration office, a police
+    station for bicycle registration) using live map data — so the
+    student doesn't have to guess an address for an analog, in-person
+    process.
+
+    Args:
+        office_type: What kind of office, e.g. "Ausländerbehörde",
+        "residence permit office", "citizen registration office", "police station".
+        city: The city to search in, e.g. "Berlin".
+        country: Optional country name to disambiguate, e.g. "Germany".
+
+    Returns:
+        A short list of real nearby offices with name and address, sorted
+        by proximity, sourced live from Google Places — NOT from memory.
+        Does not claim to know which office is fastest/least busy unless
+        the Places result itself reports that (e.g. via popular-times
+        data); if that data isn't available, say so plainly instead of
+        guessing which office is more efficient.
+    """
+    if not GOOGLE_MAPS_API_KEY:
+        return (
+            "NOT_CONFIGURED — office lookup requires a GOOGLE_MAPS_API_KEY environment "
+            "variable (Google Places API) that hasn't been set up in this deployment. "
+            "Tell the user you can't do a live location search right now, and suggest "
+            "they search '<office type> near <city>' on Google Maps directly, or check "
+            "their city's official municipal website for the correct office (many cities "
+            "assign a specific office by postal code, e.g. Berlin's Bürgeramt system)."
+        )
+
+    query = f"{office_type} near {city}" + (f", {country}" if country else "")
+    try:
+        resp = requests.get(
+            "https://maps.googleapis.com/maps/api/place/textsearch/json",
+            params={"query": query, "key": GOOGLE_MAPS_API_KEY},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return f"LOOKUP_FAILED — couldn't reach the Places API ({e}). Suggest the user search '{query}' on Google Maps directly."
+
+    if data.get("status") != "OK":
+        return f"LOOKUP_FAILED — Places API returned '{data.get('status')}'. Suggest the user search '{query}' on Google Maps directly."
+
+    results = data.get("results", [])[:5]
+    if not results:
+        return f"No results found for '{query}'. Suggest the user check the city's official municipal website — many assign a specific office by postal code/district rather than 'nearest'."
+
+    lines = [f"Nearby results for '{office_type}' in {city}:"]
+    for r in results:
+        name = r.get("name", "Unknown")
+        address = r.get("formatted_address", "address not available")
+        rating = r.get("rating")
+        rating_txt = f" (rating {rating}/5, {r.get('user_ratings_total', 0)} reviews)" if rating else ""
+        lines.append(f"- {name} — {address}{rating_txt}")
+    lines.append(
+        "\nNote: this is live map data, not an official assignment — many countries "
+        "(e.g. Germany's Bürgeramt/Ausländerbehörde system) route you to a SPECIFIC "
+        "office based on your postal code or district, not just the nearest one. "
+        "Always double-check with the city's official website or booking portal before "
+        "showing up, and book an appointment in advance where required."
+    )
+    return "\n".join(lines)
+
+
+@tool
+def plan_short_trip_budget(destination_country: str, nights: int, travelers: int = 1) -> str:
+    """Give a rough illustrative daily/total budget sanity-check for a
+    short trip to another country (e.g. a weekend trip from Germany to
+    Poland), reusing the same cost-of-living baselines used for monthly
+    budgeting, scaled down. This is NOT flight/hotel/ticket pricing — it
+    cannot look up real fares or book anything.
+
+    Args:
+        destination_country: Country being visited, e.g. "Poland".
+        nights: Number of nights for the trip.
+        travelers: Number of people splitting/incurring costs. Defaults to 1.
+
+    Returns:
+        A rough daily-cost ballpark (food + local transport, NOT flights/
+        trains/hotel) with a clear illustrative-only caveat, plus a
+        pointer toward real booking tools for actual prices — never state
+        a specific flight, train, or hotel price, since this tool has no
+        live pricing data.
+    """
+    entry = BUDGET_BASELINES.get(_normalize(destination_country))
+    if not entry:
+        return (
+            f"NOT_COVERED — no cost baseline for '{destination_country}' yet, so no "
+            f"ballpark can be given. For real fares/hotels, point the user to a flight/"
+            f"rail aggregator and a hotel-booking site directly — never invent prices."
+        )
+
+    currency = entry["currency"]
+    daily_food_low, daily_food_high = entry["food_range"][0] / 30, entry["food_range"][1] / 30
+    daily_transport_low, daily_transport_high = entry["transport_range"][0] / 30, entry["transport_range"][1] / 30
+    daily_low = (daily_food_low + daily_transport_low) * travelers
+    daily_high = (daily_food_high + daily_transport_high) * travelers
+    total_low, total_high = daily_low * nights, daily_high * nights
+
+    return (
+        f"Rough on-the-ground daily cost for {destination_country.title()} "
+        f"(food + local transport only, {travelers} traveler(s)): "
+        f"{daily_low:,.0f}-{daily_high:,.0f} {currency}/day → "
+        f"{total_low:,.0f}-{total_high:,.0f} {currency} for {nights} night(s).\n\n"
+        f"This is a rough illustrative ballpark derived from monthly cost-of-living "
+        f"baselines, scaled down — it does NOT include flights/trains or hotel cost, "
+        f"and this tool has no access to real fares. For actual prices, point the user "
+        f"to a flight/rail search (e.g. a general aggregator or the national rail "
+        f"operator's own site) and a hotel-booking site, and to book directly rather "
+        f"than relying on any number from this tool.\n\n"
+        f"If the student's visa/residence permit allows Schengen-area travel, short "
+        f"trips within the Schengen area are generally still capped by the standard "
+        f"90-days-in-any-180-days short-stay rule for the underlying travel document — "
+        f"tell them to confirm this against their own residence permit conditions, since "
+        f"it can differ by permit type and nationality."
+    )
 
 
 @tool

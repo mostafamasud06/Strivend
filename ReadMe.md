@@ -1,4 +1,4 @@
-# Scholaris — International Student Copilot
+# Strivend — International Student Copilot
 
 An AI agent built with the [Strands Agents SDK](https://strandsagents.com) that
 runs quietly in the background for international students — tracking
@@ -48,9 +48,16 @@ pip install -r requirements.txt
 export AWS_PROFILE=bedrock
 export AWS_REGION=us-west-2        # match your enabled Bedrock region
 
+# Optional — enables find_nearby_office (live Google Places lookups).
+# Without it, the tool honestly reports NOT_CONFIGURED instead of guessing.
+export GOOGLE_MAPS_API_KEY=your-key-here
+
 python app.py                      # web UI — recommended
 # python main.py                   # terminal version, useful for quick testing
 ```
+
+`app.py` serves `index.html` from a `static/` folder (`static_folder="static"`)
+— place `index.html` at `static/index.html` relative to `app.py`.
 
 Open **http://127.0.0.1:5000**. Try:
 
@@ -90,10 +97,22 @@ to deploy for real, rather than just running locally.
 ## Where to improve next
 
 1. Fully verify Italy, France, Japan, and South Korea data (replace every `VERIFY` entry).
-2. Move `data/*.jsonl` state into a real per-user database instead of local files.
-3. Deploy to Bedrock AgentCore for persistent, multi-user hosting.
+2. Move `data/*.jsonl` and `data/sessions_meta.json` into a real per-user database instead of local files — the current JSON-file persistence survives a restart but not multiple server processes.
+3. Deploy to Bedrock AgentCore for persistent, multi-user hosting (this also replaces the current "agent restarts fresh on server reboot, but displayed chat history survives" limitation with real durable memory).
 4. Add push notifications (email/SMS) for deadlines instead of requiring the user to ask.
 5. Expand country coverage beyond the initial five.
+6. `find_nearby_office` reports real, live places but can't yet tell you which office processes a given case type *fastest* — that would need a data source most cities don't expose publicly (e.g. published average wait times). Flag this honestly rather than guessing.
+7. `get_misc_local_requirement` and `get_language_certification_info` are structured for growth but sparse — add entries only once confirmed against an official source, same discipline as the rest of the knowledge base.
+
+## Recent changes (this pass)
+
+- **Session persistence + 30-day retention.** Session metadata (title, messages, country) now persists to `data/sessions_meta.json` and survives a server restart. A cleanup sweep (`_purge_expired_sessions`) runs on every session-list request and deletes any chat whose last activity is older than 30 days (`SESSION_RETENTION_DAYS` in `app.py`). Note: the underlying Strands `Agent`'s own conversational memory still resets on restart — only the *displayed* history and metadata are restored (see "Where to improve next" #3).
+- **Pinned per-chat country.** Each session now has a `country` field, set via a header dropdown or the welcome-screen chips, persisted through `PATCH /api/sessions/<id>/country`. It's injected into the agent's prompt context so the user doesn't have to repeat the country every message, and shown as a flag next to the chat in the sidebar.
+- **Chat delete confirmation.** Deleting a chat now asks for confirmation first.
+- **Scroll bug fix.** The messages pane is now a proper flex child (`min-h-0` on both `main` and `#messages`) so the chat scrolls *inside* its own pane instead of the page overflowing; new messages scroll the pane itself to bottom rather than using `scrollIntoView` on individual elements.
+- **Visual redesign.** Replaced the animated gradient-blob background and bright indigo/sky palette with a static, minimal slate palette, tighter spacing, and a subtle message fade-in — aimed at a more professional, less "demo-coded" look. Dark mode contrast was re-tuned alongside it.
+- **New tools:** `get_misc_local_requirement` (one-off admin rules like Japan's bicycle registration), `get_language_certification_info` (JLPT/TOPIK/DELF-DALF/Goethe/etc. + job-search resources), `find_nearby_office` (live Google Places lookup for in-person offices — requires `GOOGLE_MAPS_API_KEY`, honestly reports `NOT_CONFIGURED` without one rather than guessing an address), and `plan_short_trip_budget` (rough on-the-ground daily cost ballpark for short cross-border trips, explicitly excluding flights/trains/hotels, which it has no way to price).
+- **System-prompt hardening:** an explicit, unconditional rule against generating or describing how to forge/alter any official document, permit, stamp, or ID (including "as an example"), and a rule to flag the Schengen 90/180-day short-stay consideration — while still telling the user to confirm it against their own permit — whenever a scenario involves cross-border EU/Schengen travel.
 
 ---
 

@@ -44,9 +44,14 @@ from tools import (
     get_language_certification_info,
     find_nearby_office,
     plan_short_trip_budget,
+    plan_arrival_countdown,
+    draft_escalation_email,
+    find_official_source,
     fetch_official_page_summary,
     submit_feedback,
 )
+from curator import run_curator
+from digest import build_digest_for_session
 
 # How long a chat's stored data (messages + agent memory) is retained after
 # its last activity, per the 30-day retention requirement. A sweep runs on
@@ -63,14 +68,18 @@ limiter = Limiter(get_remote_address, app=app, default_limits=["60 per minute"])
 MODEL_ID = "global.anthropic.claude-sonnet-4-6"
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 
-SUPPORTED_COUNTRIES = ["Germany", "Italy", "France", "Japan", "South Korea"]
+CURATED_COUNTRIES = ["Germany", "Italy", "France", "Japan", "South Korea"]  # curated in depth; ANY country string is accepted for the "country" field elsewhere
 
 SYSTEM_PROMPT = """
 You are "Strivend" — a background copilot for international students living
-and studying abroad (currently covering Germany, Italy, France, Japan, and
-South Korea). You help track work-hour compliance, upcoming deadlines,
-budgeting, local rules, language certifications, in-person office lookups,
-and short cross-border trip planning.
+and studying anywhere abroad, on any continent. Germany, Italy, France,
+Japan, and South Korea have a curated, hand-checked knowledge base; any
+other country is fully supported too, just without that curated data yet —
+for those, lean on find_official_source + fetch_official_page_summary to
+ground answers in a live official page instead of your own memory. You
+help track work-hour compliance, upcoming deadlines, budgeting, local
+rules, language certifications, in-person office lookups, and short
+cross-border trip planning.
 
 CRITICAL RULES (never break these):
     0. Every user message may be prefixed with "[Active country for this
@@ -90,10 +99,23 @@ CRITICAL RULES (never break these):
        plausible-sounding guess, and don't drop it for a cleaner-sounding
        answer. "I don't have verified data on that" is always an
        acceptable, correct answer.
+    1a. If a country-specific tool returns NOT_COVERED for a country
+        outside the curated five, don't stop there: try
+        find_official_source to get live search leads, then
+        fetch_official_page_summary on the most official-looking result
+        (.gov/.go/embassy/university domain), and answer from what that
+        page actually says — citing the URL. If find_official_source is
+        itself NOT_CONFIGURED, or nothing official turns up, say plainly
+        that this country isn't in the curated database and point the
+        student to their own immigration authority or International
+        Office rather than guessing.
     2. If get_work_hour_limit or check_quota_remaining shows the student is
        close to or over a quota, say so plainly and proactively — don't
        wait to be asked. This is the single highest-stakes thing this
        agent does: a missed quota can put someone's visa status at risk.
+       If the situation is genuinely urgent (over quota, or a hard
+       deadline within a few days), proactively offer — don't force — to
+       draft_escalation_email so the student has something ready to send.
     3. When the user mentions a worked shift, log it with log_work_day
        without waiting to be asked — that's the whole point of tracking
        being "background," not something the user has to remember to do.
@@ -102,6 +124,18 @@ CRITICAL RULES (never break these):
        with add_deadline. Proactively check list_upcoming_deadlines at the
        start of a conversation if it's been a while, and flag anything
        within 7 days clearly.
+    4a. If the user mentions an upcoming MOVE/ARRIVAL date (e.g. "I'm
+        moving to Berlin next month"), proactively call
+        plan_arrival_countdown, then chain straight into add_deadline for
+        every step it returns with a concrete due date — don't wait for
+        the student to ask about each step one at a time. This is a
+        planning task, not a single lookup.
+    4b. If the user mentions a short trip to another country (e.g. a
+        weekend visit), proactively chain the relevant checks together in
+        one pass rather than waiting to be asked for each: quota impact if
+        it affects logged work days, plan_short_trip_budget, and the
+        Schengen 90/180-day reminder if relevant — then give one combined
+        answer.
     5. estimate_monthly_budget and plan_short_trip_budget give rough,
        illustrative figures only — always say so, never present them as
        precise or guaranteed-accurate, and never invent a specific flight,
@@ -154,6 +188,9 @@ TOOLS = [
     get_language_certification_info,
     find_nearby_office,
     plan_short_trip_budget,
+    plan_arrival_countdown,
+    draft_escalation_email,
+    find_official_source,
     fetch_official_page_summary,
     submit_feedback,
 ]
@@ -274,7 +311,7 @@ def list_sessions():
             "active": sid == session["sid"],
         })
     items.sort(key=lambda x: x["updated_at"], reverse=True)
-    return jsonify({"active_id": session["sid"], "sessions": items, "countries": SUPPORTED_COUNTRIES,
+    return jsonify({"active_id": session["sid"], "sessions": items, "countries": CURATED_COUNTRIES,
                      "retention_days": SESSION_RETENTION_DAYS})
 
 
@@ -358,6 +395,61 @@ def chat():
     except Exception as e:
         app.logger.exception("agent error")
         return jsonify({"error": "internal_error", "detail": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# On-demand agent runs — "Run knowledge check" and "Check my status"
+# buttons in the UI. Both append their result into the active chat as a
+# distinctly-labeled message (source: "curator" / "digest") so it's
+# visually obvious this came from a different agent than the main chat.
+# ---------------------------------------------------------------------------
+@app.route("/api/curator/run", methods=["POST"])
+@limiter.limit("3 per hour")
+def run_curator_endpoint():
+    """Runs the curator agent for real — live search + fetch calls per
+    unverified entry. This is genuinely slow (can be a minute or more);
+    the frontend shows a loading state that says so."""
+    data = request.get_json(silent=True) or {}
+    sid = (data.get("session_id") or session.get("sid") or "").strip()
+    if not sid:
+        return jsonify({"error": "no_active_session"}), 400
+
+    try:
+        _purge_expired_sessions()
+        s = _ensure_session(sid)
+        report = run_curator(verbose=False)
+        msg = {"role": "assistant", "content": report, "ts": _now(), "source": "curator"}
+        s["messages"].append(msg)
+        s["updated_at"] = _now()
+        _save_meta()
+        return jsonify({"report": report, "session_id": sid})
+    except Exception as e:
+        app.logger.exception("curator run failed")
+        return jsonify({"error": "curator_failed", "detail": str(e)}), 500
+
+
+@app.route("/api/digest/run", methods=["POST"])
+@limiter.limit("20 per hour")
+def run_digest_endpoint():
+    """Fast, no-Bedrock digest for just the active session — quota +
+    upcoming deadlines, computed straight from the on-disk logs."""
+    data = request.get_json(silent=True) or {}
+    sid = (data.get("session_id") or session.get("sid") or "").strip()
+    if not sid:
+        return jsonify({"error": "no_active_session"}), 400
+
+    try:
+        _purge_expired_sessions()
+        s = _ensure_session(sid)
+        report = build_digest_for_session(sid, s.get("country", ""), s.get("title", "chat"))
+        msg = {"role": "assistant", "content": report, "ts": _now(), "source": "digest"}
+        s["messages"].append(msg)
+        s["updated_at"] = _now()
+        _save_meta()
+        return jsonify({"report": report, "session_id": sid})
+    except Exception as e:
+        app.logger.exception("digest run failed")
+        return jsonify({"error": "digest_failed", "detail": str(e)}), 500
 
 
 @app.route("/api/health")

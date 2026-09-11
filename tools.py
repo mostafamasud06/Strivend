@@ -12,7 +12,7 @@ acting on it directly.
 import json
 import os
 import re
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -28,9 +28,12 @@ from knowledge_base import (
     DOCUMENT_CHECKLISTS,
     MISC_REQUIREMENTS,
     LANGUAGE_RESOURCES,
+    ARRIVAL_SEQUENCES,
 )
 
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+GOOGLE_SEARCH_API_KEY = os.environ.get("GOOGLE_SEARCH_API_KEY", "")
+GOOGLE_SEARCH_CX = os.environ.get("GOOGLE_SEARCH_CX", "")
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -645,6 +648,155 @@ def plan_short_trip_budget(destination_country: str, nights: int, travelers: int
         f"90-days-in-any-180-days short-stay rule for the underlying travel document — "
         f"tell them to confirm this against their own residence permit conditions, since "
         f"it can differ by permit type and nationality."
+    )
+
+
+@tool
+def find_official_source(country: str, topic: str) -> str:
+    """Search the live web for the likely OFFICIAL page covering a topic
+    for a country that isn't in our curated knowledge base yet (i.e. any
+    country other than Germany, Italy, France, Japan, or South Korea —
+    or a topic even those five don't have an entry for). Use this before
+    telling a user "I don't have that" for an uncovered country: find a
+    candidate official page, then use fetch_official_page_summary on the
+    best result to actually read it before answering.
+
+    Args:
+        country: The country to search for, e.g. "Poland", "Brazil", "Vietnam" — any country, not just the five curated ones.
+        topic: What you're looking for, e.g. "student work hour limit", "residence permit requirements".
+
+    Returns:
+        A short list of candidate result titles/URLs/snippets from a live
+        web search, or NOT_CONFIGURED if no search API key is set up. This
+        is a list of LEADS, not a verified answer — always fetch the
+        chosen URL with fetch_official_page_summary and read it before
+        stating anything as fact, and prefer .gov/.go/embassy/official
+        university domains over blogs or forums.
+    """
+    if not (GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_CX):
+        return (
+            "NOT_CONFIGURED — live web search requires GOOGLE_SEARCH_API_KEY and "
+            "GOOGLE_SEARCH_CX environment variables (Google Programmable Search Engine) "
+            "that haven't been set up in this deployment. Tell the user this country/topic "
+            "isn't in the curated knowledge base and isn't live-searchable right now, and "
+            "suggest they check their national immigration authority's website or their "
+            "university's International Office directly — never fill the gap from memory."
+        )
+
+    query = f"{country} international student {topic} official"
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={"key": GOOGLE_SEARCH_API_KEY, "cx": GOOGLE_SEARCH_CX, "q": query, "num": 5},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        return f"SEARCH_FAILED — couldn't reach the search API ({e}). Suggest the user search '{query}' themselves."
+
+    items = data.get("items", [])
+    if not items:
+        return f"No results found for '{query}'. Suggest the user check the national immigration authority's site or their International Office directly."
+
+    lines = [f"Live search leads for '{topic}' in {country.title()} (NOT verified yet — fetch and read before trusting):"]
+    for it in items:
+        lines.append(f"- {it.get('title', 'Untitled')} — {it.get('link', '')}\n  {it.get('snippet', '').strip()}")
+    lines.append(
+        "\nPick the most official-looking result (.gov, .go.<cc>, embassy, or the university's "
+        "own domain) and call fetch_official_page_summary on it before answering — don't answer "
+        "from these snippets alone, they're too short to be reliable."
+    )
+    return "\n".join(lines)
+
+
+@tool
+def plan_arrival_countdown(country: str, move_in_date: str) -> str:
+    """Build a dependency-ordered arrival checklist for a country, working
+    forward from the student's move-in date. Call this proactively as soon
+    as a student mentions an upcoming move/arrival date — don't wait to be
+    asked. After calling this, use add_deadline for every step that has a
+    concrete due_date so the checklist actually gets tracked, not just
+    displayed once and forgotten.
+
+    Args:
+        country: Destination country, e.g. "Germany".
+        move_in_date: The date the student moves into their address, YYYY-MM-DD.
+
+    Returns:
+        An ordered list of steps with dependencies, and a concrete
+        due_date ONLY where backed by a verified hard deadline (e.g.
+        Germany's 14-day Anmeldung rule) — everything else gets a
+        dependency note instead of an invented day-count, since we have
+        no verified source for exact lead times. NOT_COVERED if this
+        country has no sequence defined yet; in that case use
+        find_official_source instead of inventing an order yourself.
+    """
+    try:
+        move_in = datetime.strptime(move_in_date, "%Y-%m-%d").date()
+    except ValueError:
+        return "INVALID_DATE — please provide move_in_date in YYYY-MM-DD format."
+
+    entry = ARRIVAL_SEQUENCES.get(_normalize(country))
+    if not entry:
+        return (
+            f"NOT_COVERED — no arrival sequence defined for '{country}' yet. "
+            f"Use find_official_source + fetch_official_page_summary to research the "
+            f"real steps and order for this country instead of inventing one."
+        )
+
+    lines = [f"Arrival checklist for {country.title()}, moving in {move_in_date}:"]
+    for i, step in enumerate(entry["steps"], 1):
+        deps = f" (after: {', '.join(step['depends_on'])})" if step["depends_on"] else ""
+        if step["hard_deadline_days_after_movein"] is not None:
+            due = move_in + timedelta(days=step["hard_deadline_days_after_movein"])
+            lines.append(f"{i}. {step['step']}{deps} — DUE BY {due.isoformat()} (hard deadline, verified). {step['note']}")
+        else:
+            lines.append(f"{i}. {step['step']}{deps} — no fixed calendar deadline; sequence/timing note: {step['note']}")
+    lines.append(
+        "\nNow call add_deadline for each step above that has a concrete DUE BY date "
+        "(don't wait for the student to ask individually). For steps without a fixed "
+        "date, tell the student the dependency order plainly instead of guessing a date."
+    )
+    return "\n".join(lines) + _verify_note(entry)
+
+
+@tool
+def draft_escalation_email(topic: str, details: str, recipient: str = "your university's International Office") -> str:
+    """Draft (but do NOT send — this tool has no send capability) a plain,
+    factual email the student can copy and send themselves when a
+    situation is urgent: near/over a work-hour quota, a deadline within a
+    few days, or a document problem. Use this proactively when you detect
+    that kind of risk, rather than only describing the risk in prose.
+
+    Args:
+        topic: Short subject, e.g. "Upcoming Anmeldung deadline" or "Work-hour quota question".
+        details: The specific facts to include — pull these from actual tool
+        results (quota numbers, deadline dates), never invent figures here.
+        recipient: Who this is addressed to. Defaults to the university's
+        International Office; the student may specify their Ausländerbehörde,
+        academic advisor, etc. instead.
+
+    Returns:
+        A ready-to-copy email draft. Always tell the student to review and
+        personalize it before sending, and that this tool did not send
+        anything on their behalf.
+    """
+    subject = topic.strip()
+    body = (
+        f"Subject: {subject}\n\n"
+        f"Dear {recipient},\n\n"
+        f"I am writing regarding the following: {details.strip()}\n\n"
+        f"Could you please advise on the appropriate next steps, or confirm this "
+        f"information is correct? I want to make sure I stay compliant with the "
+        f"relevant requirements.\n\n"
+        f"Thank you for your time.\n\n"
+        f"Best regards,\n[Your name]\n[Your student/matriculation number, if applicable]"
+    )
+    return (
+        f"{body}\n\n"
+        f"— This is a draft only; nothing has been sent. Review the details above "
+        f"(especially any numbers/dates) before sending, and personalize the closing."
     )
 
 

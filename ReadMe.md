@@ -52,6 +52,11 @@ export AWS_REGION=us-west-2        # match your enabled Bedrock region
 # Without it, the tool honestly reports NOT_CONFIGURED instead of guessing.
 export GOOGLE_MAPS_API_KEY=your-key-here
 
+# Optional — enables find_official_source (live web search for countries
+# outside the curated five). Without it, also honestly NOT_CONFIGURED.
+export GOOGLE_SEARCH_API_KEY=your-key-here
+export GOOGLE_SEARCH_CX=your-programmable-search-engine-id
+
 python app.py                      # web UI — recommended
 # python main.py                   # terminal version, useful for quick testing
 ```
@@ -70,6 +75,33 @@ Open **http://127.0.0.1:5000**. Try:
 
 ---
 
+## Agentic workflows (beyond reactive Q&A)
+
+These are the pieces built specifically to demonstrate autonomous, multi-step
+agent behavior — not just "the agent can answer a question when asked":
+
+| Script/behavior | What it demonstrates |
+| --- | --- |
+| `curator.py` | A **separate agent**, with no user in the loop, that walks every `VERIFY` entry in `knowledge_base.py`, researches it live via `find_official_source` + `fetch_official_page_summary`, and writes `data/curation_report.md` with a CONFIRMED / OUTDATED / INCONCLUSIVE verdict. The system deciding what it doesn't know and going to check, on its own. |
+| `digest.py` | A **scheduled, unprompted** job that reads on-disk state and produces a "what needs your attention this week" digest per chat (quota usage + upcoming deadlines, urgency-flagged). Proves the app is a background agent, not a chatbot that waits to be asked — wire it to cron or Bedrock AgentCore's scheduled invocation for a real deployment. |
+| `plan_arrival_countdown` (tool) | Given just a move-in date, the agent works out the **dependency order** of arrival steps itself (insurance before enrollment, Anmeldung's hard 14-day clock, permit appointment needs enrollment first) and chains straight into `add_deadline` for each — one sentence in, a full tracked plan out, no back-and-forth. |
+| `draft_escalation_email` (tool) | When quota/deadline risk is detected, the agent proactively drafts (never sends) a ready-to-copy email to the International Office instead of just describing the risk in prose. |
+| System-prompt rules 4a/4b | Explicit instructions for the agent to **chain multiple tools in one pass** — e.g. a mentioned short trip triggers a quota check, a budget estimate, and the Schengen reminder together, instead of one lookup per user question. |
+
+Run the two standalone scripts independently of the web app:
+
+```bash
+python curator.py     # writes data/curation_report.md
+python digest.py      # writes data/digest_<session_id>.md, prints to stdout
+```
+
+Or trigger them from the UI itself — the chat header has two buttons:
+
+- **Check my status** → `POST /api/digest/run`. Fast, no Bedrock call — just reads `data/work_log.jsonl` and `data/deadlines.json` for the active chat's country. Safe to click anytime.
+- **Verify country data** → `POST /api/curator/run`. Runs the real curator agent (live search + fetch per unverified entry) — genuinely takes 1-2 minutes, and is rate-limited to 3 runs/hour per server (`@limiter.limit("3 per hour")` in `app.py`) since it's real Bedrock spend, not a canned response.
+
+Both append their result into the active chat as a message with a distinct dashed avatar, icon, and name ("Curator agent" / "Digest agent") plus a small badge — so it's visually unmistakable that this came from a separate on-demand agent run, not the main chat agent answering normally.
+
 ## File structure
 
 | File                | What it does                                                                              |
@@ -78,6 +110,8 @@ Open **http://127.0.0.1:5000**. Try:
 | `tools.py`          | 13 tools: work-hour quota tracking, deadlines, budgeting, insurance, documents, a live page-fetch tool, and a feedback logger. |
 | `main.py`           | Terminal/CLI agent entry point.                                                             |
 | `app.py`            | Flask web server exposing the agent via `/api/chat`, with per-session agent instances and rate limiting. |
+| `curator.py`        | Standalone self-auditing agent — verifies VERIFY entries against live sources, no user involved. |
+| `digest.py`         | Standalone scheduled job — proactive quota/deadline digest per chat, run via cron/AgentCore. |
 | `static/index.html` | The chat UI — boarding-pass-themed, with country chips and one-tap quick actions.            |
 | `data/`             | Auto-created at runtime: `work_log.jsonl`, `deadlines.json`, `feedback_log.jsonl`. Not committed to git. |
 
@@ -112,6 +146,7 @@ to deploy for real, rather than just running locally.
 - **Scroll bug fix.** The messages pane is now a proper flex child (`min-h-0` on both `main` and `#messages`) so the chat scrolls *inside* its own pane instead of the page overflowing; new messages scroll the pane itself to bottom rather than using `scrollIntoView` on individual elements.
 - **Visual redesign.** Replaced the animated gradient-blob background and bright indigo/sky palette with a static, minimal slate palette, tighter spacing, and a subtle message fade-in — aimed at a more professional, less "demo-coded" look. Dark mode contrast was re-tuned alongside it.
 - **New tools:** `get_misc_local_requirement` (one-off admin rules like Japan's bicycle registration), `get_language_certification_info` (JLPT/TOPIK/DELF-DALF/Goethe/etc. + job-search resources), `find_nearby_office` (live Google Places lookup for in-person offices — requires `GOOGLE_MAPS_API_KEY`, honestly reports `NOT_CONFIGURED` without one rather than guessing an address), and `plan_short_trip_budget` (rough on-the-ground daily cost ballpark for short cross-border trips, explicitly excluding flights/trains/hotels, which it has no way to price).
+- **Open country support.** The country field is no longer locked to a fixed list — the header/welcome pickers now show Germany, Italy, France, Japan, and South Korea as curated quick-picks, but accept free-text entry for any country on Earth. For the curated five, answers come from the hand-checked `knowledge_base.py`. For everything else, new `find_official_source` (live web search) + the existing `fetch_official_page_summary` let the agent find and read a real official page before answering, rather than guessing — it needs `GOOGLE_SEARCH_API_KEY`/`GOOGLE_SEARCH_CX` (a Google Programmable Search Engine) set up, and honestly reports `NOT_CONFIGURED` without them instead of fabricating an answer.
 - **System-prompt hardening:** an explicit, unconditional rule against generating or describing how to forge/alter any official document, permit, stamp, or ID (including "as an example"), and a rule to flag the Schengen 90/180-day short-stay consideration — while still telling the user to confirm it against their own permit — whenever a scenario involves cross-border EU/Schengen travel.
 
 ---

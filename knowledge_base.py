@@ -5,6 +5,14 @@ All the "facts" the agent relies on live here, in plain Python data
 structures, so you can review, correct, and extend them without touching
 any agent logic.
 
+Nothing in this file, or in tools.py, restricts the agent to a fixed list
+of countries — every lookup is a plain dict.get(country) with an honest
+NOT_COVERED fallback. Germany, Italy, France, Japan, and South Korea are
+simply the five that currently have entries. Add a same-shaped entry for
+any other country to extend static coverage; for anything not yet added,
+tools.py's find_official_source + fetch_official_page_summary let the
+agent ground an answer in a live official page instead of guessing.
+
 *** IMPORTANT BEFORE YOU SUBMIT / DEMO ***
 Germany is the fully fleshed-out reference country (spot-checked against
 2026 sources). Italy, France, Japan, and South Korea are starter entries
@@ -243,5 +251,54 @@ LANGUAGE_RESOURCES = {
         "exams": ["TOPIK — Test of Proficiency in Korean (levels 1-6)"],
         "official_sites": ["https://www.topik.go.kr"],
         "job_search": ["Work24 (work24.go.kr, public employment service)", "University international-student career offices"],
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Arrival step SEQUENCING — dependency order and any HARD calendar deadlines
+# for the "arrival countdown" planner. Deliberately conservative: we only
+# assign a concrete day-offset when it's backed by an already-verified rule
+# elsewhere in this file (e.g. Germany's Anmeldung 14-day rule from
+# LOCAL_RULES). Everything else is ORDER/DEPENDENCY only — "insurance
+# before enrollment," not an invented number of days — because we have no
+# verified source for exact lead times and won't fabricate one. Countries
+# without an entry here fall back to NOT_COVERED, pointing the agent at
+# find_official_source instead of guessing a sequence.
+# ---------------------------------------------------------------------------
+ARRIVAL_SEQUENCES = {
+    "germany": {
+        "verified": True,
+        "steps": [
+            {
+                "step": "Health insurance confirmation",
+                "depends_on": [],
+                "hard_deadline_days_after_movein": None,
+                "note": "Required before university enrollment (see get_insurance_requirement). Arrange before you enroll, ideally before arrival.",
+            },
+            {
+                "step": "Blocked account (Sperrkonto) / proof of financial means",
+                "depends_on": [],
+                "hard_deadline_days_after_movein": None,
+                "note": "Normally arranged BEFORE arrival/visa application, not after — this is a prerequisite for the student visa itself, not a post-arrival task (see track_blocked_account_balance).",
+            },
+            {
+                "step": "University enrollment (Immatrikulation)",
+                "depends_on": ["Health insurance confirmation"],
+                "hard_deadline_days_after_movein": None,
+                "note": "Requires proof of health insurance first.",
+            },
+            {
+                "step": "Anmeldung (address registration)",
+                "depends_on": [],
+                "hard_deadline_days_after_movein": 14,
+                "note": "Legal requirement — within 14 days of moving into a new address (see get_local_rules). This is a hard, verified deadline, not a suggestion.",
+            },
+            {
+                "step": "Residence permit appointment (Ausländerbehörde)",
+                "depends_on": ["Anmeldung (address registration)", "University enrollment (Immatrikulation)"],
+                "hard_deadline_days_after_movein": None,
+                "note": "Book as early as possible after Anmeldung — appointment availability varies a lot by city and isn't something this tool can predict; don't wait until close to your visa's expiry.",
+            },
+        ],
     },
 }

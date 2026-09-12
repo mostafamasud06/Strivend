@@ -5,5 +5,4 @@ bedrock-agentcore
 bedrock-agentcore-starter-toolkit
 flask
 flask-limiter
-gunicorn
 requests

@@ -38,6 +38,42 @@ Same discipline as the rest of this project family:
 
 ---
 
+## Architecture
+
+High-level view of how a message moves through the system, and how the
+two standalone agents (curator, digest) fit in alongside the main chat
+agent.
+
+![Strivend architecture diagram](docs/images/system_overview.png)
+
+---
+
+## Data flow — one turn, end to end
+
+Sequence of what actually happens when a student sends a message. The
+country tag injection (rule 0) is what lets the student stop repeating
+"Germany" every message.
+
+![Strivend data flow diagram](docs/images/request_flow.png)
+
+---
+
+## Where the two standalone agents fit
+
+`curator.py` and `digest.py` are **not** part of the chat loop. They run
+on their own schedule (or via buttons in the UI header), prove the system
+is a background agent rather than a wait-to-be-asked chatbot, and never
+overwrite `knowledge_base.py` automatically.
+
+![Curator and digest agent flow](docs/images/execution_modes.png)
+
+Both reports surface in the chat UI as messages with a **dashed-border
+avatar** and a distinct name ("Curator agent" / "Digest agent") plus a
+small badge — visually unmistakable that they came from a separate
+on-demand agent run, not the main chat agent answering normally.
+
+---
+
 ## Running it locally
 
 ```bash
@@ -101,6 +137,8 @@ Or trigger them from the UI itself — the chat header has two buttons:
 - **Verify country data** → `POST /api/curator/run`. Runs the real curator agent (live search + fetch per unverified entry) — genuinely takes 1-2 minutes, and is rate-limited to 3 runs/hour per server (`@limiter.limit("3 per hour")` in `app.py`) since it's real Bedrock spend, not a canned response.
 
 Both append their result into the active chat as a message with a distinct dashed avatar, icon, and name ("Curator agent" / "Digest agent") plus a small badge — so it's visually unmistakable that this came from a separate on-demand agent run, not the main chat agent answering normally.
+
+---
 
 ## File structure
 
